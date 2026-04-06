@@ -340,14 +340,15 @@ def evaluate_with_critical_points(model, data_loader, device, target_n=2048):
 
 # evaluate_with_critical_points(model, test_loader, device=device, target_n=100)
 
-points, labels = test_loader.dataset.get_each_class_sample(n_samples_per_class=1)
-points = points.to(device)
+if __name__ == "__main__":
+    points, labels = test_loader.dataset.get_each_class_sample(n_samples_per_class=1)
+    points = points.to(device)
 
-logits, point_features = model(points)
-critical_points_batch = extract_critical_points(point_features, points)
+    logits, point_features = model(points)
+    critical_points_batch = extract_critical_points(point_features, points)
 
-for i in range(points.shape[0]):
-    critical_points = critical_points_batch[i].cpu()
-    print(f"Sample {i}: Original points={points[i].shape[0]}, Critical points={critical_points.shape[0]}")
-    visualize_interactive(points[i].cpu(), critical_points)
+    for i in range(points.shape[0]):
+        critical_points = critical_points_batch[i].cpu()
+        print(f"Sample {i}: Original points={points[i].shape[0]}, Critical points={critical_points.shape[0]}")
+        visualize_interactive(points[i].cpu(), critical_points)
     
