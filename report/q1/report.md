@@ -46,6 +46,8 @@ Two hyperparameter sets were used to generate the visualizations. The GIFs anima
 
 ## Extending Faster R-CNN for Oriented Bounding Boxes
 
+The wandb report is at https://api.wandb.ai/links/iiith-ameykaran/0n2im2n4
+
 Outputs are placed under `oriented_bbox_results/`:
 
 ```
