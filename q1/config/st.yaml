@@ -1,5 +1,5 @@
 dataset_params:
-  root_dir: data
+  root_dir: ../data
   num_classes : 2
 
 model_params:

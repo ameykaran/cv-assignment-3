@@ -146,6 +146,9 @@ class FasterRCNN(GeneralizedRCNN):
         box_batch_size_per_image=512,
         box_positive_fraction=0.25,
         bbox_reg_weights=None,
+        angle_mode="regression",
+        num_angle_bins=36,
+        angle_loss_weight=1.0,
         **kwargs,
     ):
 
@@ -205,7 +208,9 @@ class FasterRCNN(GeneralizedRCNN):
 
         if box_predictor is None:
             representation_size = 1024
-            box_predictor = FastRCNNPredictor(representation_size, num_classes)
+            box_predictor = FastRCNNPredictor(
+                representation_size, num_classes, angle_mode=angle_mode, num_angle_bins=num_angle_bins
+            )
 
         roi_heads = RoIHeads(
             # Box
@@ -220,6 +225,9 @@ class FasterRCNN(GeneralizedRCNN):
             box_score_thresh,
             box_nms_thresh,
             box_detections_per_img,
+            angle_mode,
+            num_angle_bins,
+            angle_loss_weight,
         )
 
         if image_mean is None:
@@ -302,10 +310,19 @@ class FastRCNNPredictor(nn.Module):
         num_classes (int): number of output classes (including background)
     """
 
-    def __init__(self, in_channels, num_classes):
+    def __init__(self, in_channels, num_classes, angle_mode="regression", num_angle_bins=36):
         super().__init__()
         self.cls_score = nn.Linear(in_channels, num_classes)
         self.bbox_pred = nn.Linear(in_channels, num_classes * 4)
+        
+        self.angle_mode = angle_mode
+        self.num_angle_bins = num_angle_bins
+        if self.angle_mode == "regression":
+            self.angle_pred = nn.Linear(in_channels, 1)
+        elif self.angle_mode == "classification":
+            self.angle_pred = nn.Linear(in_channels, num_angle_bins)
+        else:
+            raise ValueError(f"Unknown angle mode: {angle_mode}")
 
     def forward(self, x):
         if x.dim() == 4:
@@ -316,8 +333,9 @@ class FastRCNNPredictor(nn.Module):
         x = x.flatten(start_dim=1)
         scores = self.cls_score(x)
         bbox_deltas = self.bbox_pred(x)
+        angle_preds = self.angle_pred(x)
 
-        return scores, bbox_deltas
+        return scores, bbox_deltas, angle_preds
 
 _COMMON_META = {
     "categories": _COCO_CATEGORIES,
@@ -379,7 +397,7 @@ def fasterrcnn_resnet50_fpn(
     model = FasterRCNN(backbone, num_classes=num_classes, **kwargs)
 
     if weights is not None:
-        model.load_state_dict(weights.get_state_dict(progress=progress, check_hash=True))
+        model.load_state_dict(weights.get_state_dict(progress=progress, check_hash=True), strict=False)
         if weights == FasterRCNN_ResNet50_FPN_Weights.COCO_V1:
             overwrite_eps(model, 0.0)
 

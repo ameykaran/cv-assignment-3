@@ -9,9 +9,9 @@ import torchvision
 from dataset.st import SceneTextDataset
 from torch.utils.data.dataloader import DataLoader
 
-import detection
-from detection.faster_rcnn import FastRCNNPredictor
-from detection.anchor_utils import AnchorGenerator
+import visualise
+from visualise.faster_rcnn import FastRCNNPredictor
+from visualise.anchor_utils import AnchorGenerator
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -287,7 +287,7 @@ def train(args):
             # Prepare targets once
             new_targets = [{
                 'boxes': obb_to_aabb(t['bboxes'].float()).to(device),
-                'labels': t['labels'].long().to(device)
+                'labels': t['labels'].long().to(device),
             } for t in targets]
 
             # Forward pass (with targets → gives loss)
