@@ -1,9 +1,18 @@
 from typing import Dict, List, Optional, Tuple
+import os
+import random
 
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 from torchvision.ops import boxes as box_ops, Conv2dNormActivation
+import torchvision
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')   # headless – no display needed
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from PIL import Image, ImageDraw
 
 from . import _utils as det_utils
 
@@ -332,6 +341,211 @@ class RegionProposalNetwork(torch.nn.Module):
 
         return objectness_loss, box_loss
 
+    # ---------------------------------------------------------------- #
+    #  Visualization helpers (called only when self.vis_val is True)   #
+    # ---------------------------------------------------------------- #
+
+    def _load_image(self, global_idx: int) -> np.ndarray:
+        """Load the cached validation image as an RGB uint8 numpy array."""
+        path = f"outputs/images/image_{global_idx}.jpg"
+        img = np.array(Image.open(path).convert("RGB"))
+        return img
+
+    # def _vis_objectness(
+    #     self,
+    #     objectness_per_level: List[Tensor],
+    #     epoch: int,
+    # ) -> None:
+    #     """
+    #     Visualization 1 - Objectness heatmap.
+
+    #     objectness_per_level is the raw list of logit tensors coming
+    #     straight out of RPNHead, one tensor per FPN level, shape [N, A, H, W].
+    #     We:
+    #       1. Sigmoid the logits to get probabilities in [0, 1].
+    #       2. Average across the A anchor channels -> one [H, W] map per image.
+    #       3. Save as a colourmap (jet) PNG.
+    #     """
+    #     out_dir = f"outputs/{self.hyperparam_name}/objectness"
+    #     os.makedirs(out_dir, exist_ok=True)
+    #     offset = getattr(self, 'val_img_offset', 0)
+
+    #     for level_idx, lvl_features in enumerate(objectness_per_level):
+    #         for img_idx in range(lvl_features.shape[0]):
+    #             global_idx = img_idx + offset
+    #             if global_idx >= 8: break
+
+    #             heatmap = torch.softmax(lvl_features[img_idx], dim=0)
+    #             heatmap = heatmap.detach().cpu().permute(1, 2, 0)
+
+    #             h_min, h_max = heatmap.min(), heatmap.max()
+    #             if h_max - h_min > 1e-6:
+    #                 heatmap = (heatmap - h_min) / (h_max - h_min)
+
+    #             height, width = heatmap.shape[:2]
+    #             dpi = 300
+    #             fig = plt.figure(figsize=(width, height), dpi=dpi)
+    #             ax = plt.Axes(fig, [0., 0., 1., 1.])
+    #             ax.set_axis_off()
+    #             fig.add_axes(ax)
+                
+    #             ax.imshow(heatmap)
+
+    #             path = f"{out_dir}/epoch{epoch:03d}_img{global_idx}_level{level_idx}.png"
+    #             fig.savefig(path, dpi=dpi)
+    #             plt.close(fig)
+
+
+
+    def _vis_objectness(
+        self,
+        objectness_per_level: List[Tensor],
+        epoch: int,
+    ) -> None:
+        out_dir = f"outputs/{self.hyperparam_name}/objectness"
+        os.makedirs(out_dir, exist_ok=True)
+        offset = getattr(self, 'val_img_offset', 0)
+
+        for level_idx, lvl_features in enumerate(objectness_per_level):
+            for img_idx in range(lvl_features.shape[0]):
+                global_idx = img_idx + offset
+                if global_idx >= 8: break
+
+                heatmap = torch.sigmoid(lvl_features[img_idx])  # (A, H, W)
+                heatmap = heatmap.permute(1, 2, 0).detach().cpu().numpy()
+                heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-6)
+
+                plt.imsave(f"{out_dir}/epoch{epoch:03d}_img{global_idx}_level{level_idx}.png", heatmap)
+                # fig, ax = plt.subplots()
+                # ax.axis("off")
+                # ax.imshow(heatmap)
+
+                # fig.savefig(f"{out_dir}/epoch{epoch:03d}_img{global_idx}_level{level_idx}.png",
+                #             dpi=100, bbox_inches="tight", pad_inches=0)
+                # plt.close(fig)
+
+    def _vis_proposals(
+        self,
+        proposal_boxes: List[Tensor],
+        image_sizes: List[Tuple[int, int]],
+        epoch: int,
+        max_show: int = 20,
+    ) -> None:
+        """
+        Visualization 2 - Object proposals.
+
+        proposal_boxes is the output of filter_proposals(): a list (one per
+        image) of [K, 4] tensors in [x1, y1, x2, y2] format in the resized
+        image coordinate space.
+
+        We draw all proposals on the original image and save.
+        """
+        out_dir = f"outputs/{self.hyperparam_name}/object_proposals"
+        os.makedirs(out_dir, exist_ok=True)
+        offset = getattr(self, 'val_img_offset', 0)
+
+        for img_idx, boxes in enumerate(proposal_boxes):
+            global_idx = img_idx + offset
+            if global_idx >= 8: break
+            img_np = self._load_image(global_idx)         # RGB uint8 [H, W, 3]
+            orig_h, orig_w = img_np.shape[:2]
+            resized_h, resized_w = image_sizes[img_idx]
+
+            # Scale boxes from resized-image space → original-image space
+            scale_x = orig_w / resized_w
+            scale_y = orig_h / resized_h
+
+            # Limit the spam on screen to max_show (top scored ones usually appear first)
+            boxes_np = boxes.detach().cpu().numpy()[:max_show]    # [max_show, 4]
+
+            img_pil = Image.fromarray(img_np)
+            draw = ImageDraw.Draw(img_pil)
+            for box in boxes_np:
+                x1, y1, x2, y2 = (
+                    box[0] * scale_x, box[1] * scale_y,
+                    box[2] * scale_x, box[3] * scale_y,
+                )
+                draw.rectangle([x1, y1, x2, y2], outline=(0, 200, 0), width=1)
+            path = f"{out_dir}/epoch{epoch:03d}_img{global_idx}.png"
+            img_pil.save(path)
+
+    def _vis_anchor_assignments(
+        self,
+        anchors: List[Tensor],
+        labels: List[Tensor],
+        image_sizes: List[Tuple[int, int]],
+        epoch: int,
+        max_show: int = 10,
+    ) -> None:
+        """
+        Visualization 3 - Anchor assignments.
+
+        labels comes from assign_targets_to_anchors():
+          1.0  → positive anchor (overlaps a GT box above fg_iou_thresh)
+          0.0  → negative anchor
+         -1.0  → ignored (between thresholds)
+
+        We randomly sample up to max_show positives and max_show
+        negatives and draw them on the image:
+          green  = positive
+          red    = negative
+          blue   = ignored
+        """
+        out_dir = f"outputs/{self.hyperparam_name}/bb_assignments"
+        os.makedirs(out_dir, exist_ok=True)
+        offset = getattr(self, 'val_img_offset', 0)
+
+        for img_idx, (anch, lbl) in enumerate(zip(anchors, labels)):
+            global_idx = img_idx + offset
+            if global_idx >= 8: break
+            img_np = self._load_image(global_idx)         # RGB uint8
+            orig_h, orig_w = img_np.shape[:2]
+            resized_h, resized_w = image_sizes[img_idx]
+            scale_x = orig_w / resized_w
+            scale_y = orig_h / resized_h
+
+            anch_np = anch.detach().cpu().numpy()      # [total_anchors, 4]
+            lbl_np  = lbl.detach().cpu().numpy()       # [total_anchors]
+
+            pos_idx = np.where(lbl_np == 1.0)[0]
+            neg_idx = np.where(lbl_np == 0.0)[0]
+            ign_idx = np.where(lbl_np == -1.0)[0]
+
+            # Subsample to max_show
+            if len(pos_idx) > max_show:
+                pos_idx = np.random.choice(pos_idx, max_show, replace=False)
+            if len(neg_idx) > max_show:
+                neg_idx = np.random.choice(neg_idx, max_show, replace=False)
+            if len(ign_idx) > max_show:
+                ign_idx = np.random.choice(ign_idx, max_show, replace=False)
+
+            img_pil = Image.fromarray(img_np)
+            draw = ImageDraw.Draw(img_pil)
+
+            for idx in pos_idx:
+                x1, y1, x2, y2 = anch_np[idx]
+                draw.rectangle(
+                    [x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y],
+                    outline=(0, 255, 0), width=2
+                )
+            for idx in neg_idx:
+                x1, y1, x2, y2 = anch_np[idx]
+                draw.rectangle(
+                    [x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y],
+                    outline=(255, 0, 0), width=2
+                )
+            for idx in ign_idx:
+                x1, y1, x2, y2 = anch_np[idx]
+                draw.rectangle(
+                    [x1 * scale_x, y1 * scale_y, x2 * scale_x, y2 * scale_y],
+                    outline=(0, 0, 255), width=2
+                )
+
+            path = f"{out_dir}/epoch{epoch:03d}_img{global_idx}.png"
+            img_pil.save(path)
+
+    # ------------------------------------------------------------------ #
+
     def forward(
         self,
         images: ImageList,
@@ -357,29 +571,41 @@ class RegionProposalNetwork(torch.nn.Module):
         """
         # RPN uses all feature maps that are available
         features = list(features.values())
+
+        # objectness_per_level: list of [N, A, H, W] tensors (raw logits, pre-concat)
+        # pred_bbox_deltas:     list of [N, A*4, H, W] tensors
         objectness, pred_bbox_deltas = self.head(features)
         anchors = self.anchor_generator(images, features)
+
+        # --- Visualization 1: objectness ---
+        if getattr(self, 'vis_val', False): self._vis_objectness(objectness, self.epoch_idx)
+
         num_images = len(anchors)
         num_anchors_per_level_shape_tensors = [o[0].shape for o in objectness]
         num_anchors_per_level = [s[0] * s[1] * s[2] for s in num_anchors_per_level_shape_tensors]
+
         objectness, pred_bbox_deltas = concat_box_prediction_layers(objectness, pred_bbox_deltas)
+
         # apply pred_bbox_deltas to anchors to obtain the decoded proposals
         # note that we detach the deltas because Faster R-CNN do not backprop through
         # the proposals
         proposals = self.box_coder.decode(pred_bbox_deltas.detach(), anchors)
         proposals = proposals.view(num_images, -1, 4)
         boxes, scores = self.filter_proposals(proposals, objectness, images.image_sizes, num_anchors_per_level)
+
+        # --- Visualization 2: object proposals that go to ROI Head ---
+        if getattr(self, 'vis_val', False): self._vis_proposals(boxes, images.image_sizes, self.epoch_idx)
+
         losses = {}
         if self.training:
             if targets is None:
                 raise ValueError("targets should not be None")
             labels, matched_gt_boxes = self.assign_targets_to_anchors(anchors, targets)
+
+            # --- Visualization 3: positive/negative anchor assignments ---
+            if getattr(self, 'vis_val', False): self._vis_anchor_assignments(anchors, labels, images.image_sizes, self.epoch_idx)
+
             regression_targets = self.box_coder.encode(matched_gt_boxes, anchors)
-            loss_objectness, loss_rpn_box_reg = self.compute_loss(
-                objectness, pred_bbox_deltas, labels, regression_targets
-            )
-            losses = {
-                "loss_objectness": loss_objectness,
-                "loss_rpn_box_reg": loss_rpn_box_reg,
-            }
+            loss_objectness, loss_rpn_box_reg = self.compute_loss(objectness, pred_bbox_deltas, labels, regression_targets)
+            losses = {"loss_objectness": loss_objectness, "loss_rpn_box_reg": loss_rpn_box_reg}
         return boxes, losses

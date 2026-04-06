@@ -1,3 +1,6 @@
+import os
+import numpy as np
+from PIL import Image, ImageDraw
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -282,6 +285,9 @@ class RoIHeads(nn.Module):
         box_features = self.box_head(box_features)
         class_logits, box_regression = self.box_predictor(box_features)
 
+        if getattr(self, 'vis_val', False):
+            self._vis_roi(class_logits, box_regression, proposals, image_shapes, getattr(self, 'epoch_idx', 0))
+
         result: List[Dict[str, torch.Tensor]] = []
         losses = {}
         if self.training:
@@ -304,3 +310,108 @@ class RoIHeads(nn.Module):
                 )
 
         return result, losses
+
+    def _load_image(self, global_idx: int) -> np.ndarray:
+        """Load the cached validation image as an RGB uint8 numpy array."""
+        path = f"outputs/images/image_{global_idx}.jpg"
+        img = np.array(Image.open(path).convert("RGB"))
+        return img
+
+    def _vis_roi(
+        self,
+        class_logits: Tensor,
+        box_regression: Tensor,
+        proposals: List[Tensor],
+        image_shapes: List[Tuple[int, int]],
+        epoch: int,
+    ) -> None:
+        """
+        Visualize the difference between RPN proposals (Yellow)
+        and final ROI regressed boxes (Red).
+        """
+        out_dir = f"outputs/{getattr(self, 'hyperparam_name', 'st')}/roi_head_outputs"
+        os.makedirs(out_dir, exist_ok=True)
+        offset = getattr(self, 'val_img_offset', 0)
+
+        predictions = box_regression[:, 4:].detach().cpu().numpy() # [sum(N), 4]
+        scores_softmax = F.softmax(class_logits, -1)
+        pred_scores = scores_softmax[:, 1:].detach().cpu().numpy() # [sum(N), 1]
+        
+        boxes_per_image = [len(p) for p in proposals]
+        
+        # Split predictions and scores to match per-image
+        pred_list = []
+        scores_list = []
+        cur = 0
+        for bpi in boxes_per_image:
+            pred_list.append(predictions[cur : cur+bpi])
+            scores_list.append(pred_scores[cur : cur+bpi].flatten())
+            cur += bpi
+
+        # sort the predictions by score
+        for i in range(len(pred_list)):
+            sorted_indices = np.argsort(scores_list[i])[::-1]
+            pred_list[i] = pred_list[i][sorted_indices]
+            scores_list[i] = scores_list[i][sorted_indices]
+
+        for img_idx, (p_boxes, preds, scores, img_shape) in enumerate(zip(proposals, pred_list, scores_list, image_shapes)):
+            global_idx = img_idx + offset
+            if global_idx >= 8: break
+            
+            # Load original image
+            img_np = self._load_image(global_idx)
+            orig_h, orig_w = img_np.shape[:2]
+            scale_x = orig_w / img_shape[1]
+            scale_y = orig_h / img_shape[0]
+            
+            orig_boxes_np = p_boxes.detach().cpu().numpy()
+            
+            img_pil = Image.fromarray(img_np)
+            draw = ImageDraw.Draw(img_pil)
+            
+            # Filter top 20 proposals with score > 0.05
+            keep = np.where(scores > 0.05)[0]
+            if len(keep) > 20:
+                 # topk equivalent in numpy
+                 top_inds = np.argsort(scores[keep])[::-1][:20]
+                 keep = keep[top_inds]
+                 
+            for idx in keep:
+                score = scores[idx]
+                orig_box = orig_boxes_np[idx]
+                
+                reg_box = np.zeros(4)
+                reg_box[0] = orig_box[0] + preds[idx, 0]
+                reg_box[1] = orig_box[1] + preds[idx, 1]
+                reg_box[2] = orig_box[2] + preds[idx, 2]
+                reg_box[3] = orig_box[3] + preds[idx, 3]
+                
+                # Scale boxes
+                ox1, oy1, ox2, oy2 = orig_box * [scale_x, scale_y, scale_x, scale_y]
+                rx1, ry1, rx2, ry2 = reg_box * [scale_x, scale_y, scale_x, scale_y]
+                
+                # RPN ground truth box (green)
+                draw.rectangle([ox1, oy1, ox2, oy2], outline=(0, 255, 0), width=2)
+                # ROI predicted box (blue)
+                draw.rectangle([rx1, ry1, rx2, ry2], outline=(0, 0, 255), width=2)
+
+
+                text = f"{score:.2f}"
+
+                # Get text size
+                text_bbox = draw.textbbox((0, 0), text)
+                text_w = text_bbox[2] - text_bbox[0]
+                text_h = text_bbox[3] - text_bbox[1]
+
+                # Position
+                text_x = rx1
+                text_y = max(0, ry1 - text_h - 2)
+
+                # Draw black background rectangle
+                draw.rectangle([text_x, text_y, text_x + text_w, text_y + text_h], fill=(0, 0, 0))
+
+                # Draw white text
+                draw.text((text_x, text_y), text, fill=(255, 255, 255))
+
+            path = f"{out_dir}/epoch{epoch:03d}_img{global_idx}.png"
+            img_pil.save(path)
