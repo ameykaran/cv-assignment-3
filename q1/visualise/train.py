@@ -9,9 +9,9 @@ import torchvision
 from dataset.st import SceneTextDataset
 from torch.utils.data.dataloader import DataLoader
 
-import visualise
-from visualise.faster_rcnn import FastRCNNPredictor
-from visualise.anchor_utils import AnchorGenerator
+import detection
+from detection.faster_rcnn import FastRCNNPredictor
+from detection.anchor_utils import AnchorGenerator
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
